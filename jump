@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>第一關・第五版：三跑道跑酷（偽 3D，美術加強）</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    font-family: "Microsoft JhengHei", "PingFang TC", sans-serif;
+    background: #1a1a2e;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  #wrap { width: 100%; max-width: 800px; padding: 10px; }
+  canvas {
+    width: 100%;
+    display: block;
+    border-radius: 10px;
+    touch-action: none;
+    cursor: pointer;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="800" height="300"></canvas>
+</div>
+<script>
+(function () {
+  "use strict";
+  var canvas = document.getElementById("game");
+  var ctx = canvas.getContext("2d");
+
+  var W = 800, H = 300;
+  var HORIZON_Y = 108;     // 遠方消失點的高度
+  var GROUND_Y = 262;      // 主角站的地方（螢幕最下面這條跑道）
+  var LANE_OFF = [-160, 0, 160];   // 三條跑道在近處的左右位置
+
+  var SLIDE_FRAMES = 32;
+
+  // 狀態：ready 開始畫面 / play 玩 / over 撞到了
+  var state = "ready";
+
+  var player = {
+    lane: 1,
+    x: 0,            // 目前的左右位置（0 = 中間跑道）
+    vy: 0,
+    jumping: false,
+    jumpH: 0,        // 腳離地多高
+    sliding: 0
+  };
+  var STAND_H = 44;
+  var SLIDE_H = 24;
+
+  var obstacles = [];  // { lane, kind:"bottom"|"top", h, z, passed }
+  var score = 0;
+  var best = 0;
+  var speed = 3.5;
+  var spawnTimer = 0;
+  var nextSpawn = 80;
+  var scroll = 0;      // 地面線條往鏡頭跑的動畫
+
+  function reset() {
+    player.lane = 1;
+    player.x = 0;
+    player.vy = 0;
+    player.jumping = false;
+    player.jumpH = 0;
+    player.sliding = 0;
+    obstacles = [];
+    score = 0;
+    speed = 3.5;
+    spawnTimer = 0;
+    nextSpawn = 80;
+    scroll = 0;
+  }
+  reset();
+
+  // 深度投影：z=0 是主角腳下（最近），z=1 是遠方消失點
+  function scaleAt(z) { return 1 - 0.85 * z; }
+  function groundYAt(z) { return GROUND_Y - z * (GROUND_Y - HORIZON_Y); }
+
+  function jump() {
+    if (state === "ready" || state === "over") {
+      state = "play";
+      reset();
+      return;
+    }
+    if (player.jumping) return;
+    player.sliding = 0;
+    player.jumping = true;
+    player.vy = -14;
+  }
+
+  function slide() {
+    if (state !== "play") return;
+    if (player.jumping) return;
+    player.sliding = SLIDE_FRAMES;
+  }
+
+  function moveLane(d) {
+    if (state !== "play") return;
+    var n = player.lane + d;
+    if (n < 0) n = 0;
+    if (n > 2) n = 2;
+    player.lane = n;
+  }
+
+  function spawnObstacle(avoidLane) {
+    var lane = Math.floor(Math.random() * 3);
+    if (avoidLane !== undefined && lane === avoidLane) {
+      lane = (lane + 1 + Math.floor(Math.random() * 2)) % 3;
+    }
+    var kind = Math.random() < 0.55 ? "bottom" : "top";
+    obstacles.push({
+      lane: lane,
+      kind: kind,
+      h: kind === "bottom" ? 50 + Math.floor(Math.random() * 31) : 0,
+      z: 1,
+      passed: false
+    });
+    return lane;
+  }
+
+  function update() {
+    if (state !== "play") return;
+
+    speed = Math.min(8, 3.5 + score * 0.03);
+
+    // 左右換跑道（滑順移動）
+    player.x += (LANE_OFF[player.lane] - player.x) * 0.25;
+
+    // 跳躍
+    if (player.jumping) {
+      player.vy += 0.7;
+      player.jumpH -= player.vy;
+      if (player.jumpH <= 0) {
+        player.jumpH = 0;
+        player.vy = 0;
+        player.jumping = false;
+      }
+    }
+
+    // 滑行倒數
+    if (player.sliding > 0) player.sliding--;
+
+    // 地面線條動畫
+    scroll = (scroll + speed * 0.0035) % 1;
+
+    // 出障礙
+    spawnTimer++;
+    if (spawnTimer >= nextSpawn) {
+      var firstLane = spawnObstacle();
+      // 三成的機會同時出兩個（一定不同跑道）
+      if (Math.random() < 0.3) spawnObstacle(firstLane);
+      spawnTimer = 0;
+      nextSpawn = 55 + Math.floor(Math.random() * 61);
+    }
+
+    // 障礙從遠方朝鏡頭跑過來
+    for (var i = obstacles.length - 1; i >= 0; i--) {
+      var o = obstacles[i];
+      o.z -= speed * 0.0025;
+
+      // 跑到主角這一層：判定撞到或跳過
+      if (!o.passed && o.z <= 0.05) {
+        o.passed = true;
+        var hit = false;
+        if (o.lane === player.lane) {
+          if (o.kind === "bottom") {
+            hit = player.jumpH < o.h;         // 地上的石塊：跳不夠高就撞到
+          } else {
+            hit = player.sliding <= 0;        // 頭上的吊柱：沒有滑行就撞到
+          }
+        }
+        if (hit) {
+          state = "over";
+          if (score > best) best = score;
+          return;
+        }
+        score++;
+      }
+
+      // 跑過鏡頭就清掉
+      if (o.z < -0.12) obstacles.splice(i, 1);
+    }
+  }
+
+  function drawBuildingRow() {
+    // 遠方兩側的樓房剪影
+    ctx.fillStyle = "#26417a";
+    for (var b = 0; b < 8; b++) {
+      var bx = 20 + b * 100 + (b % 2) * 30;
+      var bh = 18 + ((b * 37) % 22);
+      ctx.fillRect(bx, HORIZON_Y - bh, 44, bh);
+    }
+  }
+
+  function drawTrack() {
+    // 天空
+    var sky = ctx.createLinearGradient(0, 0, 0, HORIZON_Y);
+    sky.addColorStop(0, "#3a86ff");
+    sky.addColorStop(1, "#8ecae6");
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, W, HORIZON_Y);
+
+    drawBuildingRow();
+
+    // 地面
+    ctx.fillStyle = "#7a5230";
+    ctx.fillRect(0, HORIZON_Y, W, H - HORIZON_Y);
+
+    // 跑道（梯形，往消失點收縮）
+    var sFar = scaleAt(1);
+    ctx.fillStyle = "#8a5f3a";
+    ctx.beginPath();
+    ctx.moveTo(W / 2 - 240 * sFar, HORIZON_Y);
+    ctx.lineTo(W / 2 + 240 * sFar, HORIZON_Y);
+    ctx.lineTo(W / 2 + 240, GROUND_Y);
+    ctx.lineTo(W / 2 - 240, GROUND_Y);
+    ctx.closePath();
+    ctx.fill();
+
+    // 跑道之間與兩側的線：往鏡頭跑的虛線，製造速度感
+    ctx.strokeStyle = "#5d4027";
+    ctx.lineWidth = 3;
+    var offsets = [-240, -80, 80, 240];
+    for (var oi = 0; oi < offsets.length; oi++) {
+      var off = offsets[oi];
+      for (var k = 0; k < 10; k++) {
+        var p0 = (k * 0.1 + scroll) % 1;
+        var p1 = p0 + 0.045;
+        var t0 = 1 - p0, t1 = 1 - p1;
+        ctx.beginPath();
+        ctx.moveTo(W / 2 + off * scaleAt(t0), groundYAt(t0));
+        ctx.lineTo(W / 2 + off * scaleAt(t1), groundYAt(t1));
+        ctx.stroke();
+      }
+    }
+  }
+
+  function drawObstacle(o) {
+    var s = scaleAt(o.z);
+    var gy = groundYAt(o.z);
+    var x = W / 2 + LANE_OFF[o.lane] * s;
+    if (o.kind === "bottom") {
+      // 地上的石塊：要跳過去
+      var h = o.h * 1.2 * s;
+      var w = 36 * s;
+      var rock = ctx.createLinearGradient(x - w / 2, gy - h, x + w / 2, gy);
+      rock.addColorStop(0, "#9c7a52");
+      rock.addColorStop(0.55, "#6d4c2f");
+      rock.addColorStop(1, "#503522");
+      ctx.fillStyle = rock;
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(x - w / 2, gy - h, w, h, 9 * s);
+      else ctx.rect(x - w / 2, gy - h, w, h);
+      ctx.fill();
+      // 石頭的裂紋
+      ctx.strokeStyle = "rgba(0,0,0,0.28)";
+      ctx.lineWidth = Math.max(1, 2 * s);
+      ctx.beginPath();
+      ctx.moveTo(x - 7 * s, gy - h * 0.75);
+      ctx.lineTo(x + 3 * s, gy - h * 0.5);
+      ctx.lineTo(x - 4 * s, gy - h * 0.28);
+      ctx.stroke();
+      // 石頭頂上的草叢
+      ctx.fillStyle = "#43a566";
+      ctx.beginPath();
+      ctx.ellipse(x - 8 * s, gy - h, 12 * s, 5 * s, 0, 0, Math.PI * 2);
+      ctx.ellipse(x + 8 * s, gy - h, 10 * s, 4.5 * s, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#2e8b57";
+      ctx.beginPath();
+      ctx.ellipse(x, gy - h - 3 * s, 9 * s, 4 * s, 0, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      // 頭上的吊柱：要滑行躲過去
+      var bottom = gy - 34 * s;
+      var top = gy - 140 * s;
+      // 吊繩
+      ctx.strokeStyle = "#8a6a45";
+      ctx.lineWidth = Math.max(1, 3 * s);
+      ctx.beginPath();
+      ctx.moveTo(x - 24 * s, top - 70 * s);
+      ctx.lineTo(x - 20 * s, top);
+      ctx.moveTo(x + 24 * s, top - 70 * s);
+      ctx.lineTo(x + 20 * s, top);
+      ctx.stroke();
+      // 柱子本體（圓柱感：左右亮暗）
+      var pole = ctx.createLinearGradient(x - 20 * s, 0, x + 20 * s, 0);
+      pole.addColorStop(0, "#1f6b41");
+      pole.addColorStop(0.45, "#3faf6d");
+      pole.addColorStop(1, "#1f6b41");
+      ctx.fillStyle = pole;
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(x - 20 * s, top, 40 * s, bottom - top, 6 * s);
+      else ctx.rect(x - 20 * s, top, 40 * s, bottom - top);
+      ctx.fill();
+      // 下緣的黃黑警示條
+      var stripeW = (40 * s) / 4;
+      for (var si = 0; si < 4; si++) {
+        if (si % 2 === 0) {
+          ctx.fillStyle = "#ffd166";
+          ctx.fillRect(x - 20 * s + stripeW * si, bottom - 8 * s, stripeW, 8 * s);
+        }
+      }
+      ctx.fillStyle = "#1f6b41";
+      ctx.fillRect(x - 20 * s, bottom - 2 * s, 40 * s, 2 * s);
+    }
+  }
+
+  function drawPlayer() {
+    // 主角在近處（鏡頭前），站的位置隨跑道左右移
+    var px = W / 2 + player.x;
+    var sliding = player.sliding > 0;
+    var by = GROUND_Y - player.jumpH;   // 腳底的位置
+
+    // 腳下的影子
+    ctx.fillStyle = "rgba(0,0,0,0.3)";
+    ctx.beginPath();
+    ctx.ellipse(px, GROUND_Y + 4, sliding ? 26 : 20, 6, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 跑動的兩條腿（滑行時收起來）
+    if (!sliding) {
+      var legSwing = Math.sin(scroll * 80) * 4;
+      ctx.fillStyle = "#2b3550";
+      ctx.fillRect(px - 13, by - 16 - legSwing, 10, 16 + legSwing);
+      ctx.fillRect(px + 3, by - 16 + legSwing, 10, 16 - legSwing);
+      // 鞋子
+      ctx.fillStyle = "#f1f1f1";
+      ctx.fillRect(px - 14, by - 4 - legSwing, 12, 4);
+      ctx.fillRect(px + 2, by - 4 + legSwing, 12, 4);
+    }
+
+    // 身體（從背後看：紅色運動衣，漸層）
+    var ty = sliding ? by - 24 : by - 40;          // 肩膀的高度
+    var bodyBottom = sliding ? by - 6 : by - 14;
+    var bodyH = bodyBottom - ty;
+    var shirt = ctx.createLinearGradient(px - 19, ty, px + 19, ty);
+    shirt.addColorStop(0, "#d62839");
+    shirt.addColorStop(0.5, "#ff5a5f");
+    shirt.addColorStop(1, "#d62839");
+    ctx.fillStyle = shirt;
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(px - 19, ty, 38, bodyH, 8);
+    else ctx.rect(px - 19, ty, 38, bodyH);
+    ctx.fill();
+
+    // 背包（從背後看蓋在身上）跟肩帶
+    ctx.fillStyle = "#e07b39";
+    ctx.fillRect(px - 17, ty + 3, 4, bodyH * 0.45);
+    ctx.fillRect(px + 13, ty + 3, 4, bodyH * 0.45);
+    var pack = ctx.createLinearGradient(px - 12, ty, px + 12, ty);
+    pack.addColorStop(0, "#d1834a");
+    pack.addColorStop(0.5, "#f4a261");
+    pack.addColorStop(1, "#d1834a");
+    ctx.fillStyle = pack;
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(px - 12, ty + 5, 24, bodyH - 9, 6);
+    else ctx.rect(px - 12, ty + 5, 24, bodyH - 9);
+    ctx.fill();
+    ctx.fillStyle = "#b96a30";
+    ctx.fillRect(px - 12, ty + 5 + (bodyH - 9) * 0.45, 24, 3);
+
+    // 頭（從背後看：後腦勺是頭髮）跟耳朵
+    var headY = ty - (sliding ? 5 : 11);
+    ctx.fillStyle = "#ffd9b3";
+    ctx.beginPath();
+    ctx.arc(px, headY, 10, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#3a2a20";
+    ctx.beginPath();
+    ctx.arc(px, headY - 2, 10, Math.PI * 0.9, Math.PI * 2.1);
+    ctx.fill();
+    ctx.fillStyle = "#ffd9b3";
+    ctx.beginPath();
+    ctx.arc(px - 10, headY + 1, 3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(px + 10, headY + 1, 3, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 滑行時畫兩道速度線
+    if (sliding) {
+      ctx.strokeStyle = "rgba(255,255,255,0.5)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(px - 34, GROUND_Y - 8);
+      ctx.lineTo(px - 60, GROUND_Y - 8);
+      ctx.moveTo(px + 34, GROUND_Y - 8);
+      ctx.lineTo(px + 60, GROUND_Y - 8);
+      ctx.stroke();
+    }
+  }
+
+  function drawHud() {
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 22px 'Microsoft JhengHei', sans-serif";
+    ctx.textAlign = "right";
+    ctx.fillText("分數 " + score, W - 16, 32);
+    ctx.font = "13px 'Microsoft JhengHei', sans-serif";
+    ctx.fillText("最高 " + best, W - 16, 52);
+    ctx.textAlign = "left";
+  }
+
+  function drawOverlay() {
+    ctx.textAlign = "center";
+    if (state === "ready") {
+      ctx.fillStyle = "rgba(0,0,0,0.5)";
+      ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = "#ffd166";
+      ctx.font = "bold 30px 'Microsoft JhengHei', sans-serif";
+      ctx.fillText("三跑道跑酷", W / 2, 95);
+      ctx.fillStyle = "#fff";
+      ctx.font = "16px 'Microsoft JhengHei', sans-serif";
+      ctx.fillText("障礙從遠方朝你跑過來：綠吊柱要滑行、棕石塊要跳過，也可以換跑道躲", W / 2, 135);
+      ctx.fillText("電腦：左右鍵換道、向上或空白鍵跳、向下鍵滑行", W / 2, 190);
+      ctx.fillText("手機：左右滑換道、上滑跳、下滑滑行、點一下跳", W / 2, 215);
+      ctx.fillStyle = "#ffd166";
+      ctx.fillText("按一下或按任何鍵開始", W / 2, 250);
+    } else if (state === "over") {
+      ctx.fillStyle = "rgba(0,0,0,0.55)";
+      ctx.fillRect(0, 0, W, H);
+      ctx.fillStyle = "#ffd166";
+      ctx.font = "bold 32px 'Microsoft JhengHei', sans-serif";
+      ctx.fillText("撞到了！分數 " + score, W / 2, 130);
+      ctx.fillStyle = "#fff";
+      ctx.font = "17px 'Microsoft JhengHei', sans-serif";
+      ctx.fillText("按一下或按任何鍵重新開始", W / 2, 180);
+    }
+    ctx.textAlign = "left";
+  }
+
+  function draw() {
+    drawTrack();
+    // 障礙從遠到近畫（遠的先畫，近的蓋在上面）
+    var sorted = obstacles.slice().sort(function (a, b) { return b.z - a.z; });
+    for (var i = 0; i < sorted.length; i++) {
+      if (sorted[i].z >= 0) drawObstacle(sorted[i]);
+    }
+    drawPlayer();
+    // 已經衝過主角、在鏡頭前的障礙最後畫（會蓋住主角，像從兩旁擦過）
+    for (var j = 0; j < sorted.length; j++) {
+      if (sorted[j].z < 0) drawObstacle(sorted[j]);
+    }
+    drawHud();
+    drawOverlay();
+  }
+
+  function loop() {
+    update();
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  // 鍵盤
+  document.addEventListener("keydown", function (e) {
+    if (e.code === "ArrowLeft" || e.code === "KeyA") {
+      e.preventDefault();
+      moveLane(-1);
+    } else if (e.code === "ArrowRight" || e.code === "KeyD") {
+      e.preventDefault();
+      moveLane(1);
+    } else if (e.code === "ArrowUp" || e.code === "Space" || e.code === "KeyW") {
+      e.preventDefault();
+      jump();
+    } else if (e.code === "ArrowDown" || e.code === "KeyS") {
+      e.preventDefault();
+      slide();
+    }
+  });
+
+  // 觸控與滑鼠：滑的方向決定動作，點一下就是跳
+  var touchStart = null;
+  canvas.addEventListener("pointerdown", function (e) {
+    touchStart = { x: e.clientX, y: e.clientY };
+  });
+  canvas.addEventListener("pointerup", function (e) {
+    if (!touchStart) return;
+    var dx = e.clientX - touchStart.x;
+    var dy = e.clientY - touchStart.y;
+    touchStart = null;
+    if (dy < -30) {
+      jump();
+    } else if (dy > 30) {
+      slide();
+    } else if (dx < -30) {
+      moveLane(-1);
+    } else if (dx > 30) {
+      moveLane(1);
+    } else {
+      jump();
+    }
+  });
+
+  loop();
+})();
+</script>
+</body>
+</html>
